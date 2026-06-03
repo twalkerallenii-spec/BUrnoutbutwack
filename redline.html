@@ -137,7 +137,7 @@
 <div class="hud" id="speedo"><span id="speedNum">0</span><span id="speedUnit">MPH</span></div>
 <div class="hud" id="boostWrap"><div id="boostLabel">BOOST</div><div id="boostTrack"><div id="boostFill"></div></div></div>
 <div class="hud" id="scoreBox"><div id="score">0</div><div id="scoreLbl">SCORE</div></div>
-<div class="hud" id="posBox"><div id="posNum">—</div><div id="posLbl">POSITION</div></div>
+<div class="hud" id="posBox"><div id="posNum">—</div><div id="posLbl">POSITION</div><div id="lapNum" style="margin-top:10px;font-size:30px;font-weight:800;color:#7fd4ff">—</div><div id="lapLbl" style="font-size:11px;letter-spacing:2px;color:#9fb3c8">LAP</div></div>
 <div class="hud" id="objBox"><div id="objVal">—</div><div id="objLbl">OBJECTIVE</div></div>
 <div class="hud" id="feed"></div>
 
@@ -153,10 +153,20 @@
   <h1 class="logo">REDLINE</h1>
   <h2 class="sub">TAKEDOWN RACING</h2>
   <button class="btn" id="toWorlds">START</button>
+  <button class="btn" id="toOnline" style="margin-top:14px;background:linear-gradient(135deg,#1a6ec0,#0a3a6a);">ONLINE RACE ▸</button>
   <div class="ctrls">
     <b>◀ ▶ / A D</b> steer · <b>▲ / W</b> throttle · <b>▼ / S</b> brake · <b>SHIFT</b> boost · <b>SPACE</b> crashbreaker<br>
     Race the rivals to the finish · ram them into walls for takedowns · don't let them wreck you
   </div>
+</div>
+
+<div class="screen hidden" id="lobbyScreen">
+  <h1 class="logo" style="font-size:54px">ONLINE LOBBY</h1>
+  <h2 class="sub" id="lobbyWorld">—</h2>
+  <div id="lobbyTimer" style="font-size:72px;font-weight:900;color:#7fd4ff;margin:10px 0;font-family:Orbitron,sans-serif">60</div>
+  <div id="lobbyStatus" style="font-size:18px;color:#9fb3c8;letter-spacing:2px">CONNECTING…</div>
+  <div id="lobbyPlayers" style="font-size:15px;color:#cfe;margin-top:14px;min-height:24px"></div>
+  <button class="btn" id="lobbyCancel" style="margin-top:22px;background:#3a2230">CANCEL</button>
 </div>
 
 <div class="screen hidden" id="worldScreen">
@@ -265,6 +275,42 @@ const EVENTS={
 };
 let selectedEvent='race';
 
+// ================= MULTIPLAYER CLIENT (online race only) =================
+// Connects to the Render server. Set the URL to your deployed server.
+const NET=(()=>{
+  const listeners={}; let ws=null, connected=false, myId=null, mySlot=0, lastSent=0;
+  const SEND_HZ=15; const cars=new Map(); // id -> {x,dist,speed,boosting,crashed,ai,name}
+  function on(e,fn){(listeners[e]||(listeners[e]=[])).push(fn);}
+  function emit(e,d){(listeners[e]||[]).forEach(fn=>{try{fn(d);}catch(err){console.error(err);}});}
+  function connect(world,event,name){
+    if(ws){try{ws.close();}catch(e){}}
+    cars.clear(); connected=false;
+    try{ ws=new WebSocket(NET.url); }catch(e){ emit('error',e); return; }
+    ws.onopen=()=>{ connected=true; ws.send(JSON.stringify({t:'join',world,event,name:name||'PLAYER'})); emit('open'); };
+    ws.onclose=()=>{ connected=false; emit('close'); };
+    ws.onerror=(e)=>{ emit('error',e); };
+    ws.onmessage=(ev)=>{ let m; try{m=JSON.parse(ev.data);}catch(e){return;} route(m); };
+  }
+  function route(m){
+    switch(m.t){
+      case 'joined': myId=m.id; mySlot=m.slot; emit('joined',m); emit('lobby',{count:m.players.length,capacity:m.capacity,secondsLeft:m.secondsLeft}); break;
+      case 'lobby': emit('lobby',m); break;
+      case 'start': emit('start',m.grid); break;
+      case 'snapshot': cars.clear(); for(const c of m.cars){ if(c.id===myId)continue; cars.set(c.id,c); } emit('snapshot',cars); break;
+      case 'player_join': emit('player_join',m.player); break;
+      case 'player_leave': cars.delete(m.id); emit('player_leave',m.id); break;
+      case 'event': emit('event',m); break;
+      case 'finished': emit('finished',m); break;
+    }
+  }
+  function sendState(s){ if(!connected||!ws||ws.readyState!==1)return; const now=performance.now(); if(now-lastSent<1000/SEND_HZ)return; lastSent=now; ws.send(JSON.stringify({t:'state',x:s.x,dist:s.dist,speed:s.speed,boosting:s.boosting,crashed:s.crashed})); }
+  function sendFinished(position){ if(!connected||!ws||ws.readyState!==1)return; ws.send(JSON.stringify({t:'finished',position})); }
+  function leave(){ try{ if(ws&&connected)ws.send(JSON.stringify({t:'leave'})); ws&&ws.close(); }catch(e){} connected=false; }
+  return { url:'wss://burnoutbutwack.onrender.com', connect, sendState, sendFinished, leave, on,
+    get cars(){return cars;}, get myId(){return myId;}, get mySlot(){return mySlot;}, get connected(){return connected;} };
+})();
+// ========================================================================
+
 const ROSTER=[
   {id:'viper',  name:'VIPER GT', cls:'BALANCED',   color:0xff3b2f, classColor:0xffd24a, maxSpeed:80, boostMul:1.0, strength:1.0, price:0,      weight:'MEDIUM', cb:6, shape:'classic'},
   {id:'phantom',name:'PHANTOM',  cls:'TOP SPEED',  color:0x2a6cff, classColor:0x9af0ff, maxSpeed:92, boostMul:0.85,strength:0.8, price:18000,  weight:'LIGHT',  cb:5, shape:'speed'},
@@ -368,6 +414,7 @@ const G={
   boost:0, boostMax:100, boosting:false, charged:false,
   score:0, combo:1, comboTimer:0,
   steer:0, x:0, dist:0, trackLen:4200, scrollZ:0,
+  lap:1, totalLaps:3, lapLen:4200, curve:0, online:false,
   health:100, healthMax:100, hitCooldown:0, regenDelay:0,
   cbCharge:0, cbReady:false, shake:0, timeScale:1, slowmo:0,
   raceTime:0, takedowns:0, position:1,
@@ -736,6 +783,51 @@ function spawnRacers(){
       vx:0,vrot:0,vz:0,crashing:false,crashT:0,tag,controller:'ai'}); // MP_HOOK
   }
 }
+
+// ---- ONLINE: remote cars driven by server snapshots ----
+const remoteCars=new Map(); // id -> {mesh, tag, dist, x, name, ai}
+function clearRemoteCars(){ remoteCars.forEach(r=>{ scene.remove(r.mesh); if(r.tag)r.tag.remove(); }); remoteCars.clear(); }
+function beginOnlineRace(grid){
+  G.online=true;
+  show(null);
+  const W=WORLDS[selectedWorld];
+  buildWorldEnv();buildRoad();buildPlayer();clearCars();clearRemoteCars();
+  Object.assign(G,{started:true,racing:false,crashed:false,finished:false,speed:0,boost:25,boosting:false,charged:false,score:0,combo:1,comboTimer:0,steer:0,x:0,dist:0,scrollZ:0,health:100,hitCooldown:0,regenDelay:0,cbCharge:0,cbReady:false,shake:0,timeScale:1,slowmo:0,raceTime:0,takedowns:0,position:1,
+    event:'race',diffMul:1,noRegen:false,won:false,failMsg:'',crushStage:0,flipping:false,aftertouch:false});
+  G.hover=!!ROSTER.find(c=>c.id===selectedCar).hover; G.baseY=G.hover?1.4:0;
+  applyCrush(0);
+  G.totalLaps=3; G.lap=1; G.lapLen=W.length; G.trackLen=W.length*3; scrollZ=0;
+  // build a remote mesh for every grid slot that isn't me
+  grid.forEach((entry,i)=>{
+    if(entry.id===NET.myId)return;
+    const shp=RIVAL_SHAPES[i%RIVAL_SHAPES.length];
+    const col=RIVAL_COLORS[i%RIVAL_COLORS.length];
+    const m=makeCar(col,false,0xffe24a,{shape:shp}); m.position.set(entry.slot*0,0,-9999); scene.add(m);
+    const tag=document.createElement('div'); tag.className='enemyTag rival'; const nm=(entry.ai?'CPU':entry.name||'PLAYER'); tag.textContent=nm; tag.dataset.name=nm; document.body.appendChild(tag);
+    remoteCars.set(entry.id,{mesh:m,tag,dist:0,x:0,name:nm,ai:entry.ai});
+  });
+  mapWorld.textContent=W.name+'  ·  ONLINE';
+  buildMapDots();placeFinishGate();
+  document.getElementById('objBox').classList.remove('on');
+  document.getElementById('posBox').style.display='block';
+  player.position.set(0,G.baseY,8);
+  startCountdown();
+  clock.start();
+}
+// Position remote cars from the latest NET snapshot each frame.
+function updateRemoteCars(){
+  if(!G.online)return;
+  for(const [id,car] of NET.cars){
+    let r=remoteCars.get(id);
+    if(!r)continue; // not in our grid (shouldn't happen for race)
+    r.dist=car.dist; r.x=car.x;
+    const relZ=G.dist-car.dist;
+    r.mesh.position.set(car.x+curveX(relZ),0,relZ);
+    r.mesh.visible=relZ<60 && relZ>-G.trackLen;
+    r.mesh.rotation.y=-curveAt(G.dist)*0.25;
+  }
+}
+
 function spawnTraffic(){
   // lanes 0,1,2 = oncoming half (left); lanes 3,4,5 = same-direction half (right)
   const laneIdx=Math.floor(Math.random()*6);
@@ -771,8 +863,8 @@ function initBloom(){
 }
 
 const elSpeed=document.getElementById('speedNum'),elBF=document.getElementById('boostFill'),elScore=document.getElementById('score'),elFeed=document.getElementById('feed'),elVig=document.getElementById('vig'),elBV=document.getElementById('boostVig'),crashEl=document.getElementById('crash'),cbWrap=document.getElementById('cbWrap'),cbFill=document.getElementById('cbFill'),posNum=document.getElementById('posNum'),mapDist=document.getElementById('mapDist'),mapWorld=document.getElementById('mapWorld'),mapTrack=document.getElementById('mapTrack');
-const feedColors={'TAKEDOWN':'#ff3b2f','CHECK':'#ffd24a','NEAR MISS':'#7fd4ff','REVENGE':'#ff7a18','BURNOUT CHAIN':'#ff9d2f','CRASHBREAKER':'#ffe24a','IMPACT':'#ff9d2f','GO!':'#2dbb4e','SLAM':'#ff3b2f','PILEUP':'#ff7a18','ELIMINATOR':'#ff5a1f','ELIMINATED':'#ff3b2f','DAMAGED':'#ffd24a','WRECKING':'#ff5a1f','SUPER BOOST':'#ff5a1f','SHOVE':'#ffd24a'};
-function pop(t){const d=document.createElement('div');d.className='pop';d.textContent=t;d.style.color=feedColors[t]||'#fff';elFeed.appendChild(d);requestAnimationFrame(()=>d.classList.add('show'));setTimeout(()=>d.remove(),1100);}
+const feedColors={'TAKEDOWN':'#ff3b2f','CHECK':'#ffd24a','NEAR MISS':'#7fd4ff','REVENGE':'#ff7a18','BURNOUT CHAIN':'#ff9d2f','CRASHBREAKER':'#ffe24a','IMPACT':'#ff9d2f','GO!':'#2dbb4e','SLAM':'#ff3b2f','PILEUP':'#ff7a18','ELIMINATOR':'#ff5a1f','ELIMINATED':'#ff3b2f','DAMAGED':'#ffd24a','WRECKING':'#ff5a1f','SUPER BOOST':'#ff5a1f','SHOVE':'#ffd24a','LAP':'#7fd4ff','FINAL LAP':'#ffd24a'};
+function pop(t){const d=document.createElement('div');d.className='pop';d.textContent=t;d.style.color=feedColors[t]||feedColors[t.split(' ')[0]]||'#fff';elFeed.appendChild(d);requestAnimationFrame(()=>d.classList.add('show'));setTimeout(()=>d.remove(),1100);}
 function addScore(n,label){const g=Math.round(n*G.combo);G.score+=g;elScore.textContent=G.score.toLocaleString();if(label)pop(label);G.combo=Math.min(G.combo+0.18,10);G.comboTimer=2.8;}
 function addBoost(n){G.boost=Math.min(G.boost+n,G.boostMax);if(G.boost>=G.boostMax)G.charged=true;}
 
@@ -851,18 +943,41 @@ function openGarage(){
 }
 function closeGarage(){ gActive=false; if(gRAF)cancelAnimationFrame(gRAF); }
 function garageNav(dir){ gIndex=(gIndex+dir+ROSTER.length)%ROSTER.length; loadGarageCar(); }
-document.getElementById('toWorlds').onclick=()=>{renderWorlds();show('worldScreen');};
+document.getElementById('toWorlds').onclick=()=>{onlineMode=false;renderWorlds();show('worldScreen');};
 document.getElementById('toEvent').onclick=()=>{renderEvents();show('eventScreen');};
 document.getElementById('eventBackWorlds').onclick=()=>{renderWorlds();show('worldScreen');};
 document.getElementById('toGarage').onclick=()=>{openGarage();};
 document.getElementById('backToEvent').onclick=()=>{closeGarage();renderEvents();show('eventScreen');};
-document.getElementById('startRace').onclick=()=>{ if(!ownsCar(selectedCar))return; closeGarage(); beginRace(); };
+document.getElementById('startRace').onclick=()=>{ if(!ownsCar(selectedCar))return; closeGarage(); if(onlineMode){ startOnline(); } else { beginRace(); } };
+
+// ---- ONLINE flow ----
+let onlineMode=false, onlineGrid=null;
+document.getElementById('toOnline').onclick=()=>{ onlineMode=true; selectedEvent='race'; renderWorlds(); show('worldScreen'); };
+document.getElementById('lobbyCancel').onclick=()=>{ NET.leave(); G.online=false; onlineGrid=null; show('titleScreen'); };
+function startOnline(){
+  const W=WORLDS[selectedWorld];
+  document.getElementById('lobbyWorld').textContent=W.name+'  ·  ONLINE RACE';
+  document.getElementById('lobbyStatus').textContent='CONNECTING…';
+  document.getElementById('lobbyTimer').textContent='—';
+  document.getElementById('lobbyPlayers').textContent='';
+  show('lobbyScreen');
+  NET.connect(selectedWorld,'race','PLAYER');
+}
+NET.on('open',()=>{ document.getElementById('lobbyStatus').textContent='WAITING FOR PLAYERS…'; });
+NET.on('error',()=>{ document.getElementById('lobbyStatus').textContent='CONNECTION FAILED — server may be waking up, try again in a minute.'; });
+NET.on('close',()=>{ if(!G.online){ const s=document.getElementById('lobbyStatus'); if(s&&s.textContent==='WAITING FOR PLAYERS…')s.textContent='DISCONNECTED'; } });
+NET.on('lobby',(info)=>{
+  const t=document.getElementById('lobbyTimer'); if(t)t.textContent=(info.secondsLeft!=null?info.secondsLeft:'—');
+  const p=document.getElementById('lobbyPlayers'); if(p)p.textContent=(info.count||1)+' / '+(info.capacity||6)+' players  ·  empty slots become CPU';
+});
+NET.on('start',(grid)=>{ onlineGrid=grid; beginOnlineRace(grid); });
+
 document.getElementById('garagePrev').onclick=()=>garageNav(-1);
 document.getElementById('garageNext').onclick=()=>garageNav(1);
 document.getElementById('garageBuy').onclick=()=>{ const spec=ROSTER[gIndex]; if(buyCar(spec.id)){ selectedCar=spec.id; loadGarageCar(); } else { const s=document.getElementById('garageCarStatus'); s.textContent='NOT ENOUGH CASH'; setTimeout(loadGarageCar,1000); } };
-document.getElementById('finishAgain').onclick=()=>beginRace();
-document.getElementById('finishGarage').onclick=()=>{openGarage();};
-document.getElementById('finishWorlds').onclick=()=>{renderWorlds();show('worldScreen');};
+document.getElementById('finishAgain').onclick=()=>{onlineMode=false;beginRace();};
+document.getElementById('finishGarage').onclick=()=>{onlineMode=false;openGarage();};
+document.getElementById('finishWorlds').onclick=()=>{onlineMode=false;renderWorlds();show('worldScreen');};
 
 let scrollZ=0;
 function clearCars(){cars.forEach(c=>{scene.remove(c.mesh);if(c.tag)c.tag.remove();});cars.length=0;rivalCount=0;}
@@ -877,7 +992,14 @@ function beginRace(){
     event:ev,diffMul,noRegen:false,rageQuota:0,rageCount:0,elimAlive:0,elimTimer:0,elimInterval:0,eliminated:false,won:false,failMsg:'',crushStage:0,flipping:false});
   G.hover=!!ROSTER.find(c=>c.id===selectedCar).hover; G.baseY=G.hover?1.4:0;
   applyCrush(0);
-  G.trackLen=W.length;scrollZ=0;
+  // LAPS: each lap is one "world length". Race mode runs 3 laps; other modes
+  // (roadrage/eliminator/gauntlet) are single continuous runs decided by their
+  // own win conditions, so they use 1 lap.
+  G.totalLaps = (ev==='race') ? 3 : 1;
+  G.lap = 1;
+  G.lapLen = W.length;
+  G.trackLen = W.length * G.totalLaps;   // total distance to finish
+  scrollZ=0;
 
   // event-specific setup
   if(ev==='gauntlet'){
@@ -1032,6 +1154,16 @@ function animate(){
   // hover float for hover cars (when alive)
   if(G.hover&&!G.crashed&&player){ player.position.y=G.baseY+Math.sin(performance.now()*0.004)*0.12; }
   updateCars(dt);updateParticles(dt);updateRoad();updateBoostFX(dt);updateHUD(dt);updateCamera(dt);updateTags();updateRacePositions();updateMap();
+  // ONLINE: render the other racers from the latest server snapshot, and broadcast mine
+  if(G.online){
+    updateRemoteCars();
+    NET.sendState({ x:G.x, dist:G.dist, speed:G.speed, boosting:G.boosting, crashed:G.crashed });
+  }
+  // LAP tracking: bump the lap counter each time we cross a lap boundary
+  if(G.racing&&!G.finished&&G.totalLaps>1){
+    const lapNow=Math.min(G.totalLaps, Math.floor(G.dist/G.lapLen)+1);
+    if(lapNow>G.lap){ G.lap=lapNow; if(G.lap<=G.totalLaps){ pop(G.lap===G.totalLaps?'FINAL LAP':('LAP '+G.lap+'/'+G.totalLaps)); G.shake=Math.max(G.shake,0.12); } }
+  }
   if(G.racing&&!G.finished&&G.dist>=G.trackLen){finishRace();}
   if(G.racing&&!G.finished){updateEvent(realDt);}
   if(G.crashed&&!G.cbReady){G.cbCharge=Math.min(G.cbCharge+realDt*0.9,1);cbFill.style.width=(G.cbCharge*100)+'%';if(G.cbCharge>=1)G.cbReady=true;}
@@ -1081,11 +1213,17 @@ function updateDriving(dt){
   const left=keys['ArrowLeft']||keys['KeyA'],right=keys['ArrowRight']||keys['KeyD'];
   const stTarget=(left?-1:0)+(right?1:0);G.steer+=(stTarget-G.steer)*dt*8;
   G.x+=G.steer*dt*28*(0.6+G.speed/G.maxSpeed*0.6);
+  // CURVE FORCE: the bend nudges you toward its outside; steer to hold your line.
+  // Dead-zone ignores tiny residual curvature so near-straight road never drifts you.
+  const cv=curveAt(G.dist);
+  const cvForce=Math.abs(cv)<0.06?0:cv;
+  G.x+=cvForce*dt*20*(0.4+G.speed/G.maxSpeed*0.8);
+  G.curve=cv;
   if(Math.abs(G.x)>HALF-2){G.x=T.MathUtils.clamp(G.x,-(HALF-2),HALF-2);G.speed*=0.985;G.shake=Math.max(G.shake,0.15);burst(player.position.clone().add(new T.Vector3(Math.sign(G.x)*1.2,.5,0)),0xffd24a,6,1,6);}
   const adv=G.speed*dt;G.dist+=adv;scrollZ=G.dist;G.scrollZ=scrollZ;
   let pz=8-Math.min(8,G.dist*0.1); if(G.dist>2)pz=0;
   player.position.set(G.x,G.hover?G.baseY:0,pz);
-  player.rotation.y=-G.steer*0.18;player.rotation.z=-G.steer*0.08;
+  player.rotation.y=-G.steer*0.18 - cv*0.22;player.rotation.z=-G.steer*0.08;
 }
 
 function updateCars(dt){
@@ -1117,7 +1255,7 @@ function updateCars(dt){
     else{
       c.trackPos+=c.speed*dt;
       const relZ=G.dist-c.trackPos;
-      c.mesh.position.set(c.x,0,relZ);
+      c.mesh.position.set(c.x+curveX(relZ),0,relZ);
       if(relZ>60){scene.remove(c.mesh);if(c.tag)c.tag.remove();cars.splice(i,1);continue;}
       const dz=relZ,dx=c.x-G.x;
       // Revenge-style: same-direction traffic is checkable from a WIDER window + lower speed.
@@ -1221,8 +1359,8 @@ function updateRacer(c,dt){
     c.x+=(c.gridX*0.3-c.x)*dt*0.5;
   }
   c.x=T.MathUtils.clamp(c.x,-HALF+2,HALF-2);
-  c.mesh.position.set(c.x,0,relZ);
-  c.mesh.rotation.y=Math.sign(c.x-G.x)*-0.05 + (c.slamming>0?Math.sign(G.x-c.x)*0.12:0);
+  c.mesh.position.set(c.x+curveX(relZ),0,relZ);
+  c.mesh.rotation.y=Math.sign(c.x-G.x)*-0.05 + (c.slamming>0?Math.sign(G.x-c.x)*0.12:0) - curveAt(G.dist)*0.25;
   c.mesh.rotation.z=(c.slamming>0?Math.sign(G.x-c.x)*0.1:0);
 
   // ---- collision with player ----
@@ -1256,11 +1394,23 @@ function updateRacer(c,dt){
 }
 function flashRivalHP(c){if(!c.tag)return;const pct=Math.max(0,Math.round(c.rhp/c.rhpMax*100));c.tag.textContent=(c.tag.dataset.name||'RIVAL')+'  '+pct+'%';c.hpFlash=0.9;}
 
+// ---- Pseudo-3D sweeping curves (accumulation principle) ----
+// curveAt(d) returns signed curvature at track distance d. CRITICAL: it must be
+// exactly 0 at d=0 and vary smoothly, so straight road exerts no sideways force
+// (the bias bug that broke the earlier attempt). Pure sines with no phase offset
+// all start at 0, so their sum starts at 0.
+function curveAt(d){
+  const s=d*0.0012;
+  return Math.sin(s)*0.55 + Math.sin(s*0.43)*0.32 + Math.sin(s*1.9)*0.16;
+}
+const CURVE_BEND=0.0016;  // how strongly the road visually sweeps
+// X offset of the road centerline at camera-relative depth relZ (negative = ahead).
+// Far-ahead road bends more (ahead²) — the OutRun accumulation illusion in 3D.
+function curveX(relZ){ const ahead=Math.max(0,-relZ); return curveAt(G.dist+ahead)*ahead*ahead*CURVE_BEND; }
+
 function updateRoad(){
   const total=SEG_COUNT*SEG_LEN;
   const shift=((scrollZ%SEG_LEN)+SEG_LEN)%SEG_LEN; // 0..SEG_LEN, always positive
-  // wrap point: recycle a segment once it's mostly behind the camera (camera sits ~+11).
-  // pulling this in from +SEG_LEN to +0.6*SEG_LEN stops tall signs/overpasses lingering in view.
   const WRAP=SEG_LEN*0.6;
   roadSegs.forEach(seg=>{
     const idx=seg.userData.idx;
@@ -1268,8 +1418,9 @@ function updateRoad(){
     while(z>WRAP)z-=total;
     while(z<WRAP-total)z+=total;
     seg.position.z=z;
+    seg.position.x=curveX(z);          // bend the segment sideways onto the curve
   });
-  if(finishGate){finishGate.position.z=-(G.trackLen-G.dist);}
+  if(finishGate){const a=Math.max(0,G.trackLen-G.dist);finishGate.position.z=-a;finishGate.position.x=curveX(-a);}
 }
 function updateBoostFX(dt){elBF.style.width=(G.boost/G.boostMax*100)+'%';elBF.classList.toggle('charged',G.charged);elBF.classList.toggle('firing',G.boosting);if(playerFlame){playerFlame.visible=G.boosting;if(G.boosting){playerFlame.children.forEach((f,i)=>f.scale.z=1+Math.sin(performance.now()*0.03+i)*0.4);boostLight.intensity=3;}else boostLight.intensity=0;}elBV.style.opacity=G.boosting?'0.9':'0';if(G.boosting&&Math.random()<dt*30)burst(player.position.clone().add(new T.Vector3((Math.random()-.5),0.5,3.2)),0x5ac8ff,4,1,5);}
 function updateHUD(dt){
@@ -1288,9 +1439,24 @@ function updateHUD(dt){
   // trailing smoke when badly wrecked
   if(!G.crashed&&G.crushStage>=2&&G.racing&&Math.random()<dt*18)burst(player.position.clone().add(new T.Vector3((Math.random()-.5),0.8,-1.5)),0x333333,3,1.5,4);
 }
-function updateRacePositions(){const racers=cars.filter(c=>c.racer&&c.alive);let ahead=0;racers.forEach(c=>{if(c.dist>G.dist)ahead++;});G.position=ahead+1;posNum.textContent=ordinal(G.position);posNum.style.color=G.position===1?'#2dbb4e':'#ffd24a';}
+function updateRacePositions(){
+  let ahead=0;
+  if(G.online){ for(const [,r] of remoteCars){ if(r.dist>G.dist)ahead++; } }
+  else { cars.filter(c=>c.racer&&c.alive).forEach(c=>{if(c.dist>G.dist)ahead++;}); }
+  G.position=ahead+1;posNum.textContent=ordinal(G.position);posNum.style.color=G.position===1?'#2dbb4e':'#ffd24a';
+}
 function ordinal(n){const s=['th','st','nd','rd'],v=n%100;return n+(s[(v-20)%10]||s[v]||s[0]);}
-function updateMap(){const total=G.trackLen;if(mapDots[0])mapDots[0].style.left=Math.min(100,G.dist/total*100)+'%';const racers=cars.filter(c=>c.racer);let di=1;racers.forEach(c=>{const d=mapDots[di++];if(d){d.style.left=Math.min(100,Math.max(0,c.dist/total*100))+'%';d.style.opacity=c.alive?1:0.3;}});mapDist.textContent=Math.min(100,Math.round(G.dist/total*100))+'%';}
+function updateMap(){
+  // the on-screen progress bar shows progress through the CURRENT lap
+  const lapLen=G.lapLen||G.trackLen, total=G.trackLen;
+  const lapProg=((G.dist % lapLen)/lapLen)*100;
+  if(mapDots[0])mapDots[0].style.left=Math.min(100,lapProg)+'%';
+  const racers=cars.filter(c=>c.racer);let di=1;racers.forEach(c=>{const d=mapDots[di++];if(d){d.style.left=Math.min(100,Math.max(0,((c.dist%lapLen)/lapLen)*100))+'%';d.style.opacity=c.alive?1:0.3;}});
+  mapDist.textContent=Math.min(100,Math.round(G.dist/total*100))+'%';
+  // lap readout
+  const ln=document.getElementById('lapNum');
+  if(ln){ if(G.totalLaps>1){ ln.textContent=G.lap+'/'+G.totalLaps; ln.parentElement.querySelector('#lapLbl').style.display='block'; ln.style.display='block'; } else { ln.style.display='none'; const ll=document.getElementById('lapLbl'); if(ll)ll.style.display='none'; } }
+}
 
 function finishRace(){
   // reaching the finish line means different things per mode
@@ -1300,6 +1466,7 @@ function finishRace(){
   // RACE
   G.finished=true;G.racing=false;updateRacePositions();
   G.won=(G.position===1);
+  if(G.online){ NET.sendFinished(G.position); NET.leave(); G.online=false; }
   showFinish(G.position===1?'YOU WIN':'FINISH', G.position===1);
 }
 function eventWin(){ if(G.finished)return; G.finished=true;G.racing=false;G.won=true;
