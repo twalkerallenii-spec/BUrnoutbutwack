@@ -261,6 +261,13 @@ function handleMessage(ws, msg) {
       broadcast(room, { t: 'finished', id: ws.id, position: msg.position });
       break;
     }
+    case 'start_now': {
+      // a player used the START NOW code — end the lobby immediately and run the
+      // normal race start, which fills empty slots with REAL (moving) server AI.
+      const room = ws.room; if (!room) return;
+      if (room.phase === 'lobby') startRace(room);
+      break;
+    }
     case 'leave': removeFromRoom(ws); break;
   }
 }
